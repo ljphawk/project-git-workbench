@@ -1,0 +1,220 @@
+{
+  "name": "project-git-workbench",
+  "displayName": "Project Git",
+  "description": "A repository-focused Git workbench for folders containing many independent projects.",
+  "version": "0.4.7",
+  "publisher": "local-dev",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "SCM Providers"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/src/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . --watch",
+    "test": "npm run compile && node --test dist/test/*.test.js",
+    "package": "npm run compile && vsce package --allow-missing-repository",
+    "vscode:prepublish": "npm run compile"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^4.1.0",
+    "typescript": "^5.7.0"
+  },
+  "contributes": {
+    "keybindings": [
+      {
+        "command": "projectGit.closeDiff",
+        "key": "escape",
+        "when": "projectGit.diffActive && editorFocus && !suggestWidgetVisible && !findWidgetVisible && !renameInputVisible && !inSnippetMode && !parameterHintsVisible && !inlineSuggestionVisible && !editorHoverVisible && !referenceSearchVisible && !accessibleViewIsShown"
+      }
+    ],
+    "commands": [
+      {
+        "command": "projectGit.openFromExplorer",
+        "title": "Project Git: 打开资源管理器选中项的仓库"
+      },
+      {
+        "command": "projectGit.closeDiff",
+        "title": "Project Git: 关闭代码对比",
+        "enablement": "projectGit.diffActive"
+      },
+      {
+        "command": "projectGit.open",
+        "title": "Project Git: 打开 Git 工作台",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "projectGit.openResource",
+        "title": "在 Project Git 中打开",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "projectGit.pickRepository",
+        "title": "Project Git: 切换项目",
+        "icon": "$(repo)"
+      },
+      {
+        "command": "projectGit.refresh",
+        "title": "Project Git: 刷新",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "projectGit.showChanges",
+        "title": "Project Git: 连续比对当前项目更改"
+      },
+      {
+        "command": "projectGit.previousDiffChange",
+        "title": "Project Git: 上一处修改（跨文件）",
+        "icon": "$(arrow-up)",
+        "enablement": "projectGit.diffNavigation"
+      },
+      {
+        "command": "projectGit.nextDiffChange",
+        "title": "Project Git: 下一处修改（跨文件）",
+        "icon": "$(arrow-down)",
+        "enablement": "projectGit.diffNavigation"
+      },
+      {
+        "command": "projectGit.refreshLocalChanges",
+        "title": "Project Git: 刷新 Local Changes",
+        "icon": "$(refresh)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "projectGit",
+          "title": "Project Git",
+          "icon": "media/git.svg"
+        }
+      ]
+    },
+    "views": {
+      "projectGit": [
+        {
+          "id": "projectGit.localChanges",
+          "name": "Local Changes",
+          "when": "projectGit.diffActive",
+          "visibility": "visible"
+        },
+        {
+          "id": "projectGit.workbench",
+          "name": "Git 工作台",
+          "type": "webview",
+          "when": "!projectGit.diffActive"
+        }
+      ]
+    },
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "projectGit.openResource",
+          "when": "resourceScheme == file",
+          "group": "navigation@20"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "projectGit.openResource",
+          "when": "resourceScheme == file",
+          "group": "navigation@20"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "projectGit.pickRepository",
+          "when": "view == projectGit.workbench",
+          "group": "navigation@1"
+        },
+        {
+          "command": "projectGit.open",
+          "when": "view == projectGit.workbench",
+          "group": "navigation@2"
+        },
+        {
+          "command": "projectGit.refresh",
+          "when": "view == projectGit.workbench",
+          "group": "navigation@3"
+        },
+        {
+          "command": "projectGit.refreshLocalChanges",
+          "when": "view == projectGit.localChanges",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Project Git",
+      "properties": {
+        "projectGit.autoFollowEditor": {
+          "type": "boolean",
+          "default": true,
+          "description": "打开文件时自动切换到文件所属的 Git 仓库。"
+        },
+        "projectGit.scanDepth": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 12,
+          "description": "查找工作区内 Git 仓库的最大目录深度；不进入依赖和构建目录。"
+        },
+        "projectGit.logLimit": {
+          "type": "number",
+          "default": 150,
+          "minimum": 20,
+          "maximum": 1000,
+          "description": "每次加载的提交记录数量。"
+        },
+        "projectGit.afterDiffSidebar": {
+          "type": "string",
+          "default": "explorer",
+          "enum": [
+            "explorer",
+            "search",
+            "scm",
+            "debug",
+            "extensions",
+            "projectGit"
+          ],
+          "enumDescriptions": [
+            "资源管理器",
+            "搜索",
+            "VS Code 源代码管理",
+            "运行和调试",
+            "扩展",
+            "Project Git 工作台"
+          ],
+          "description": "离开 Project Git 比对页后返回的侧边栏模块。VS Code 公开接口不提供此前活动模块，因此使用此固定目标。比对期间手动切换到其他侧边栏模块时保留你的选择。"
+        }
+      }
+    },
+    "viewsWelcome": [
+      {
+        "view": "projectGit.localChanges",
+        "contents": "当前项目没有本地更改。"
+      }
+    ]
+  }
+}
