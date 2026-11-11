@@ -30,13 +30,13 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
 }
 
 test('pulling an inactive branch uses its actual upstream and preserves current HEAD, index, dirty files and FETCH_HEAD', async t => {
-  const { repo, file, advance, actions } = await fixture(t);
+  const { repo, file, advance, actions, initial } = await fixture(t);
   await fs.writeFile(file('base.txt'), 'staged\n'); await repo.stage(['base.txt']);
   await fs.writeFile(file('base.txt'), 'working\n'); await fs.writeFile(file('untracked'), 'keep');
   const before = await repo.head(), index = await repo.run(['write-tree']);
   const fetchHead = await fs.readFile(file('.git/FETCH_HEAD'));
   const remote = await advance();
-  assert.deepEqual(await actions.pullBranch(ref), { branch: ref.name, status: 'fast-forward' });
+  assert.deepEqual(await actions.pullBranch(ref), { branch: ref.name, status: 'fast-forward', range: { before: initial, after: remote } });
   assert.equal((await repo.run(['rev-parse', 'refs/heads/local/dev'])).trim(), remote);
   assert.equal((await repo.run(['rev-parse', 'refs/remotes/company/server/dev'])).trim(), remote);
   assert.deepEqual(await repo.head(), before); assert.equal((await repo.snapshot()).branch, 'main');

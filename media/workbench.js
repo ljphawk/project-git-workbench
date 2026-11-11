@@ -8,7 +8,7 @@
   let state = {}, selected = new Set(), known = new Set(), root = '', selectedCommit = '', commitFiles = [], filter = '';
   const app = document.getElementById('app');
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-  let history;
+  let history, seenPullReview;
   const persist = () => vscode.setState({ tab, drafts, history: history?.preferences() });
   const send = (type, extra = {}) => vscode.postMessage({ type, root: state.root, ...extra });
   const paths = () => [...selected];
@@ -201,7 +201,14 @@
         for (const p of next) if (!known.has(p)) selected.add(p);
         known = next;
       }
-      state = message; history.onState(changed); render();
+      state = message;
+      history.onState(changed);
+      if (message.snapshot && message.pullReview?.id && message.pullReview.id !== seenPullReview) {
+        seenPullReview = message.pullReview.id;
+        tab = 'log';
+        persist();
+        history.showPullReview(message.pullReview);
+      } else render();
     }
     if (message.type === 'commitFiles' && message.root === root && message.hash === selectedCommit) { commitFiles = message.files; render(); }
     if (message.type === 'completed' && message.action === 'commit') { delete drafts[message.root]; delete amends[message.root]; persist(); if (message.root === root) render(); }

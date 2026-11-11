@@ -2,7 +2,9 @@ import type { Repository, Commit, Change } from './git';
 
 export interface GitRef { kind: 'head' | 'local' | 'remote' | 'tag'; name?: string }
 export interface GitTag { name: string; hash: string; commit?: string; annotated: boolean }
+export interface CommitRange { before?: string; after: string }
 export interface HistoryQuery {
+  range?: CommitRange;
   refs?: GitRef[]; text?: string; regex?: boolean; matchCase?: boolean;
   author?: string; after?: string; before?: string; path?: string;
   skip?: number; limit?: number; firstParent?: boolean; noMerges?: boolean;
@@ -15,7 +17,7 @@ export interface HistoryPage {
 }
 export interface CommitDetails {
   hash: string; parents: string[]; author: string; email: string; authoredAt: string;
-  committer: string; committerEmail: string; committedAt: string; message: string; files: Change[];
+  committer: string; committerEmail: string; committedAt: string; message: string; files: Change[]; branches: string[];
 }
 interface CatalogEntry { full: string; object: string; type: string; commit?: string }
 const isHash = (hash: unknown): hash is string => typeof hash === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(hash);
@@ -73,6 +75,16 @@ export class HistoryService {
     return value;
   }
 
+  private async rangeRoots(range: CommitRange): Promise<string[]> {
+    const after = await this.requireCommit(range.after);
+    if (range.before === undefined) return [after];
+    return [after, `^${await this.requireCommit(range.before)}`];
+  }
+
+  async countRange(range: CommitRange): Promise<number> {
+    return Number((await this.repo.run(['rev-list', '--count', ...await this.rangeRoots(range), '--'])).trim());
+  }
+
   async query(query: HistoryQuery = {}): Promise<HistoryPage> {
     if (!query || typeof query !== 'object' || Array.isArray(query)) throw new Error('历史筛选条件无效。');
     const limit = query.limit ?? 150, skip = query.skip ?? 0;
@@ -87,10 +99,12 @@ export class HistoryService {
     });
     if (dates[0] && dates[1] && Date.parse(dates[0]) > Date.parse(dates[1])) throw new Error('开始日期不能晚于结束日期。');
     if (query.refs !== undefined && (!Array.isArray(query.refs) || query.refs.length > 32)) throw new Error('最多同时筛选 32 个分支或标签。');
-    const head = await this.repo.head();
+    const head = query.range ? null : await this.repo.head();
     let roots: string[];
     let comparison: HistoryPage['comparison'];
-    if (query.compare) {
+    if (query.range) {
+      roots = await this.rangeRoots(query.range);
+    } else if (query.compare) {
       if (!head || !['incoming', 'outgoing'].includes(query.compare.direction)) throw new Error('比较方向无效，或当前分支没有提交。');
       const other = await this.resolve(query.compare.ref);
       const [outgoing, incoming] = (await this.repo.run(['rev-list', '--left-right', '--count', `${head.hash}...${other.hash}`])).trim().split(/\s+/).map(Number);
@@ -129,10 +143,28 @@ export class HistoryService {
     return { commits: commits.slice(0, limit), hasMore: commits.length > limit, skip, comparison };
   }
 
+  private async containingBranches(hash: string): Promise<string[]> {
+    const [refs, head] = await Promise.all([
+      this.repo.run(['for-each-ref', `--contains=${hash}`, '--sort=refname', '--format=%(refname)%00%(symref)', 'refs/heads/', 'refs/remotes/']),
+      this.repo.run(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], [0, 1]),
+    ]);
+    const branches = refs.split('\n').filter(Boolean).flatMap(line => {
+      const [ref, target] = line.split('\0');
+      return target ? [] : [ref.replace(/^refs\/(heads|remotes)\//, '')];
+    });
+    if (head.trim()) {
+      const contains = await this.repo.run(['merge-base', '--is-ancestor', hash, head.trim()], [0])
+        .then(() => true, () => false);
+      if (contains) branches.unshift('HEAD');
+    }
+    return branches;
+  }
+
   async details(hash: string): Promise<CommitDetails> {
     await this.requireCommit(hash);
     const fields = (await this.repo.run(['show', '-s', '--no-notes', '--no-show-signature', '--no-color', '--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B', hash, '--'])).split('\0');
-    return { hash: fields[0], parents: fields[1].split(' ').filter(Boolean), author: fields[2], email: fields[3], authoredAt: fields[4], committer: fields[5], committerEmail: fields[6], committedAt: fields[7], message: fields.slice(8).join('\0').trimEnd(), files: await this.repo.commitFiles(hash) };
+    const [files, branches] = await Promise.all([this.repo.commitFiles(hash), this.containingBranches(hash)]);
+    return { hash: fields[0], parents: fields[1].split(' ').filter(Boolean), author: fields[2], email: fields[3], authoredAt: fields[4], committer: fields[5], committerEmail: fields[6], committedAt: fields[7], message: fields.slice(8).join('\0').trimEnd(), files, branches };
   }
 
   async compare(from: string, to: string): Promise<RevisionComparison> {

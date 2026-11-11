@@ -78,6 +78,7 @@
     onState(changed) {
       const snapshot = this.host.state().snapshot;
       if (changed) {
+        this.pullReview = undefined;
         this.root = this.host.root(); const prefs = this.repos[this.root] || {};
         this.refs = prefs.refs || []; this.filters = { ...defaults(), ...(prefs.filters || {}) }; this.branchSearch = prefs.branchSearch || ''; this.collapsed = new Set(prefs.collapsed || []);
         this.compareMode = prefs.compareMode; this.rows = []; this.ready = false; this.loading = false; this.signature = ''; this.error = '';
@@ -92,11 +93,19 @@
       if (this.active() && !this.host.state().busy && !this.host.state().loading && this.currentSignature() !== this.signature) this.load();
     }
     currentSignature() {
+      if (this.pullReview) return this.pullReview.id;
       const s = this.host.state().snapshot;
       return s ? JSON.stringify([s.head?.hash, s.branch, s.branches.map(b => [b.name, b.hash]), (s.tags || []).map(t => [t.name, t.hash])]) : '';
     }
     activate() { if (this.active() && this.host.state().snapshot && (!this.ready && !this.loading || this.currentSignature() !== this.signature)) this.load(); }
+    showPullReview(review) {
+      this.pullReview = review;
+      this.menu = undefined;
+      this.popover = '';
+      this.load();
+    }
     query(skip) {
+      if (this.pullReview) return { range: this.pullReview.range, skip, limit: this.host.state().historyPageSize || 150 };
       const f = this.filters;
       return {
         refs: this.refs.map(ref => this.wire(ref)), text: f.text, regex: f.regex, matchCase: f.matchCase, author: f.author,
@@ -109,7 +118,7 @@
     load(append = false) {
       if (!this.active() || !this.host.state().snapshot) return;
       clearTimeout(this.debounce);
-      if (this.filters.after && this.filters.before && this.filters.after > this.filters.before) { this.error = '开始日期不能晚于结束日期。'; this.loading = false; this.host.redraw(); return; }
+      if (!this.pullReview && this.filters.after && this.filters.before && this.filters.after > this.filters.before) { this.error = '开始日期不能晚于结束日期。'; this.loading = false; this.host.redraw(); return; }
       this.append = append; this.request = ++this.counter; this.signature = this.currentSignature(); this.error = ''; this.loading = true;
       if (!append) { this.rows = []; this.ready = false; this.hasMore = false; this.selected = ''; this.selection.clear(); this.details = undefined; this.revisionComparison = undefined; this.showComparison = false; this.detailRequest = ++this.counter; this.compareRequest = ++this.counter; }
       this.host.redraw();
@@ -141,6 +150,7 @@
       this.host.redraw(); return true;
     }
     choose(refKey, multi = false) {
+      this.pullReview = undefined;
       this.compareMode = undefined; this.showComparison = false; this.revisionComparison = undefined;
       if (refKey === 'ALL') this.refs = [];
       else {
@@ -154,6 +164,7 @@
       if (multi) {
         if (this.selection.has(hash)) this.selection.delete(hash); else { if (this.selection.size >= 2) this.selection.delete([...this.selection][0]); this.selection.add(hash); }
       } else this.selection = new Set([hash]);
+      this.showContainingBranches = false;
       this.compareRequest = ++this.counter; this.selected = hash; this.details = undefined; this.detailError = ''; this.filesFilter = ''; this.showComparison = false;
       this.detailRequest = ++this.counter; this.host.redraw(); this.host.send('commitDetails', { hash, requestId: this.detailRequest });
     }
@@ -207,6 +218,10 @@
     }
     filtersView() {
       const e = this.host.esc, f = this.filters;
+      if (this.pullReview) {
+        const { branch, count } = this.pullReview;
+        return `<div class="history-toolbar"><strong>本次 Pull · ${e(branch)} · ${count} 条新提交</strong><span class="spacer"></span>${this.hbutton('返回完整 Log', 'closePullReview')}</div>`;
+      }
       const chip = this.compareMode ? `Compare: ${this.compareMode.ref.name}` : this.refs.length ? `Branch: ${this.refs.map(ref => ref.name || 'HEAD').join(', ')}` : 'Branch: All';
       const pop = (name, label, active) => this.hbutton(`${label}${active ? ' ●' : ''} ⌄`, 'popover', `data-popover="${name}" aria-expanded="${this.popover === name}"`, false, 'history-filter-button');
       let popup = '';
@@ -220,17 +235,23 @@
       const e = this.host.esc, comparison = this.showComparison ? this.revisionComparison || this.comparison : undefined;
       const divider = `<div class="history-detail-divider" role="separator" aria-label="调整提交详情高度" aria-orientation="horizontal" aria-valuemin="20" aria-valuemax="70" aria-valuenow="${this.detailHeight}" tabindex="0" title="上下拖动调整详情高度"></div>`;
       if (comparison) return `${divider}<section class="history-details"><div class="history-detail-heading"><strong>文件比较</strong><code>${e(comparison.from.slice(0, 8))} ↔ ${e(comparison.to.slice(0, 8))}</code>${this.hbutton('×', 'closeComparison', 'aria-label="关闭文件比较"', false, 'quiet')}</div><div class="history-details-scroll">${comparison.files.length ? comparison.files.map(file => `<button class="history-changed-file" data-hact="compareFile" data-path="${e(file.path)}" data-from="${e(comparison.from)}" data-to="${e(comparison.to)}"><span class="status ${file.index === 'D' ? 'deleted' : file.index === 'A' ? 'added' : 'modified'}">${e(file.index)}</span>${e(file.path)}</button>`).join('') : '<p class="muted">两个版本的文件内容相同。</p>'}</div></section>`;
-      if (!this.view.details) return '';
+      if (!this.view.details && !this.pullReview) return '';
       const current = this.rows.find(row => row.hash === this.selected);
       if (!current) return '<div class="history-detail-hint">选择提交查看完整信息和改动文件 · ⌘/Ctrl 单击可选择两条提交进行比较</div>';
       const detail = this.details, files = (detail?.files || []).filter(file => file.path.toLowerCase().includes(this.filesFilter.toLowerCase()));
-      return `${divider}<section class="history-details"><div class="history-detail-heading"><strong>${e(current.subject)}</strong>${this.hbutton('复制 SHA', 'copyHash', `data-hash="${e(current.hash)}"`, false, 'quiet')}${this.hbutton('⋯', 'commitMenu', `data-hash="${e(current.hash)}" aria-label="提交操作菜单"`, false, 'quiet')}</div>${this.detailError ? `<div class="history-error" role="alert">${e(this.detailError)}</div>` : ''}<div class="history-detail-columns"><div class="history-commit-message"><code>${e(current.hash)}</code><p>${e(detail?.author || current.author)}${detail?.email ? ' &lt;' + e(detail.email) + '&gt;' : ''}<br><span class="muted">${e(new Date(detail?.committedAt || current.date).toLocaleString())}${current.parents.length > 1 ? ' · Merge / 第一父提交' : ''}</span></p><pre>${e(detail?.message || '正在读取完整提交信息…')}</pre></div><div class="history-detail-file-panel"><input id="changed-files-filter" type="search" value="${e(this.filesFilter)}" placeholder="筛选改动文件…" aria-label="筛选提交中的文件"><div class="history-details-scroll">${files.map(file => `<button class="history-changed-file" data-hact="fileDiff" data-hash="${e(current.hash)}" data-path="${e(file.path)}"><span class="status ${file.index === 'D' ? 'deleted' : file.index === 'A' ? 'added' : 'modified'}">${e(file.index)}</span>${e(file.path)}</button>`).join('') || `<p class="muted">${detail ? '没有匹配的文件改动。' : '正在读取文件…'}</p>`}</div></div></div></section>`;
+      const branches = detail?.branches;
+      const containment = branches ? `<div class="history-containing-branches">
+        <span>In ${branches.length} ${branches.length === 1 ? 'branch' : 'branches'}</span>
+        ${branches.length ? this.hbutton(this.showContainingBranches ? 'Hide' : 'Show', 'toggleContainingBranches', `aria-expanded="${!!this.showContainingBranches}" aria-controls="history-containing-branches"`, false, 'quiet') : ''}
+        <ul id="history-containing-branches" ${this.showContainingBranches ? '' : 'hidden'}>${branches.map(branch => `<li>${e(branch)}</li>`).join('')}</ul>
+      </div>` : '';
+      return `${divider}<section class="history-details"><div class="history-detail-heading"><strong>${e(current.subject)}</strong>${this.hbutton('复制 SHA', 'copyHash', `data-hash="${e(current.hash)}"`, false, 'quiet')}${this.hbutton('⋯', 'commitMenu', `data-hash="${e(current.hash)}" aria-label="提交操作菜单"`, false, 'quiet')}</div>${this.detailError ? `<div class="history-error" role="alert">${e(this.detailError)}</div>` : ''}<div class="history-detail-columns"><div class="history-commit-message"><code>${e(current.hash)}</code><p>${e(detail?.author || current.author)}${detail?.email ? ' &lt;' + e(detail.email) + '&gt;' : ''}<br><span class="muted">${e(new Date(detail?.committedAt || current.date).toLocaleString())}${current.parents.length > 1 ? ' · Merge / 第一父提交' : ''}</span></p>${containment}<pre>${e(detail?.message || '正在读取完整提交信息…')}</pre></div><div class="history-detail-file-panel"><input id="changed-files-filter" type="search" value="${e(this.filesFilter)}" placeholder="筛选改动文件…" aria-label="筛选提交中的文件"><div class="history-details-scroll">${files.map(file => `<button class="history-changed-file" data-hact="fileDiff" data-hash="${e(current.hash)}" data-path="${e(file.path)}"><span class="status ${file.index === 'D' ? 'deleted' : file.index === 'A' ? 'added' : 'modified'}">${e(file.index)}</span>${e(file.path)}</button>`).join('') || `<p class="muted">${detail ? '没有匹配的文件改动。' : '正在读取文件…'}</p>`}</div></div></div></section>`;
     }
     viewMarkup(snapshot) {
       const e = this.host.esc, graphs = this.graph();
       const columns = `<span class="history-subject">Commit</span>${this.view.author ? '<span class="history-author">User</span>' : ''}${this.view.date ? '<span class="history-date">Date</span>' : ''}${this.view.hash ? '<span class="history-hash">Hash</span>' : ''}`;
       const operation = snapshot.operation;
-      return `<div class="history-workspace ${this.treeHidden ? 'tree-hidden' : ''} ${this.treeOverlay ? 'tree-overlay' : ''}">${this.tree(snapshot)}<div class="history-divider" role="separator" aria-label="调整分支栏宽度" aria-orientation="vertical" aria-valuemin="160" aria-valuemax="520" aria-valuenow="${this.width}" tabindex="0"></div><section class="history-main" aria-label="提交日志">${this.filtersView()}${operation ? `<div class="history-operation" role="status"><strong>${e(operation.type)} 进行中</strong><span>${operation.conflicts ? '请解决冲突并暂存文件' : '可以继续或中止操作'}</span>${this.hbutton('继续', 'continueOperation', '', this.host.state().busy || operation.conflicts)}${operation.type !== 'merge' ? this.hbutton('跳过当前提交…', 'skipOperation', '', this.host.state().busy) : ''}${this.hbutton('中止…', 'abortOperation', '', this.host.state().busy)}</div>` : ''}${this.comparison && this.compareMode ? `<div class="history-comparison-bar"><strong>${e(this.comparison.label)} ↔ 当前检出分支</strong>${this.hbutton(`Incoming ${this.comparison.incoming}`, 'incoming', '', false, this.compareMode.direction === 'incoming' ? 'toggled' : '')}${this.hbutton(`Outgoing ${this.comparison.outgoing}`, 'outgoing', '', false, this.compareMode.direction === 'outgoing' ? 'toggled' : '')}${this.hbutton(`文件差异 ${this.comparison.files.length}`, 'branchFiles')}${this.hbutton('×', 'clearRefs', 'aria-label="退出分支比较"')}</div>` : ''}${this.error ? `<div class="history-error" role="alert"><pre>${e(this.error)}</pre>${this.hbutton('重试', 'reload')}</div>` : ''}<div class="history-table-heading"><span class="history-graph-heading">Graph</span>${columns}</div><div class="history-commits-scroll" role="list" aria-label="提交历史" aria-busy="${this.loading}">${this.rows.map((commit, index) => `<button class="history-log-row ${this.selection.has(commit.hash) ? 'selected' : ''} ${commit.parents.length > 1 ? 'is-merge' : ''}" data-hact="selectCommit" data-hash="${e(commit.hash)}" aria-pressed="${this.selection.has(commit.hash)}" title="${e(commit.subject)}">${graphs[index]}<span class="history-subject">${this.view.refs && commit.refs ? `<span class="history-ref-badge">${e(commit.refs)}</span>` : ''}<span>${e(commit.subject)}</span></span>${this.view.author ? `<span class="history-author">${e(commit.author)}</span>` : ''}${this.view.date ? `<time class="history-date">${e(new Date(commit.date).toLocaleString())}</time>` : ''}${this.view.hash ? `<code class="history-hash">${e(commit.hash.slice(0, 8))}</code>` : ''}</button>`).join('') || `<div class="history-empty"><strong>${this.loading ? '正在读取提交历史…' : '没有匹配的提交'}</strong><p>${this.loading ? '正在按当前分支和筛选条件查询仓库。' : '可清除筛选、选择其他分支，或先完成仓库的首次提交。'}</p></div>`}</div><div class="history-log-footer"><span>${this.rows.length} commits${this.loading ? ' · 读取中…' : ''}</span>${this.hasMore ? this.hbutton('加载更多', 'more', '', this.loading) : ''}<span class="spacer"></span>${this.hbutton('比较所选提交', 'compareSelected', '', this.selection.size !== 2)}</div>${this.detailView()}</section>${this.renderMenu()}</div>`;
+      return `<div class="history-workspace ${this.treeHidden ? 'tree-hidden' : ''} ${this.treeOverlay ? 'tree-overlay' : ''}">${this.tree(snapshot)}<div class="history-divider" role="separator" aria-label="调整分支栏宽度" aria-orientation="vertical" aria-valuemin="160" aria-valuemax="520" aria-valuenow="${this.width}" tabindex="0"></div><section class="history-main" aria-label="提交日志">${this.filtersView()}${operation ? `<div class="history-operation" role="status"><strong>${e(operation.type)} 进行中</strong><span>${operation.conflicts ? '请解决冲突并暂存文件' : '可以继续或中止操作'}</span>${this.hbutton('继续', 'continueOperation', '', this.host.state().busy || operation.conflicts)}${operation.type !== 'merge' ? this.hbutton('跳过当前提交…', 'skipOperation', '', this.host.state().busy) : ''}${this.hbutton('中止…', 'abortOperation', '', this.host.state().busy)}</div>` : ''}${!this.pullReview && this.comparison && this.compareMode ? `<div class="history-comparison-bar"><strong>${e(this.comparison.label)} ↔ 当前检出分支</strong>${this.hbutton(`Incoming ${this.comparison.incoming}`, 'incoming', '', false, this.compareMode.direction === 'incoming' ? 'toggled' : '')}${this.hbutton(`Outgoing ${this.comparison.outgoing}`, 'outgoing', '', false, this.compareMode.direction === 'outgoing' ? 'toggled' : '')}${this.hbutton(`文件差异 ${this.comparison.files.length}`, 'branchFiles')}${this.hbutton('×', 'clearRefs', 'aria-label="退出分支比较"')}</div>` : ''}${this.error ? `<div class="history-error" role="alert"><pre>${e(this.error)}</pre>${this.hbutton('重试', 'reload')}</div>` : ''}<div class="history-table-heading"><span class="history-graph-heading">Graph</span>${columns}</div><div class="history-commits-scroll" role="list" aria-label="提交历史" aria-busy="${this.loading}">${this.rows.map((commit, index) => `<button class="history-log-row ${this.selection.has(commit.hash) ? 'selected' : ''} ${commit.parents.length > 1 ? 'is-merge' : ''}" data-hact="selectCommit" data-hash="${e(commit.hash)}" aria-pressed="${this.selection.has(commit.hash)}" title="${e(commit.subject)}">${graphs[index]}<span class="history-subject">${this.view.refs && commit.refs ? `<span class="history-ref-badge">${e(commit.refs)}</span>` : ''}<span>${e(commit.subject)}</span></span>${this.view.author ? `<span class="history-author">${e(commit.author)}</span>` : ''}${this.view.date ? `<time class="history-date">${e(new Date(commit.date).toLocaleString())}</time>` : ''}${this.view.hash ? `<code class="history-hash">${e(commit.hash.slice(0, 8))}</code>` : ''}</button>`).join('') || `<div class="history-empty"><strong>${this.loading ? '正在读取提交历史…' : '没有匹配的提交'}</strong><p>${this.loading ? '正在按当前分支和筛选条件查询仓库。' : '可清除筛选、选择其他分支，或先完成仓库的首次提交。'}</p></div>`}</div><div class="history-log-footer"><span>${this.rows.length} commits${this.loading ? ' · 读取中…' : ''}</span>${this.hasMore ? this.hbutton('加载更多', 'more', '', this.loading) : ''}<span class="spacer"></span>${this.hbutton('比较所选提交', 'compareSelected', '', this.selection.size !== 2)}</div>${this.detailView()}</section>${this.renderMenu()}</div>`;
     }
     renderMenu() {
       if (!this.menu) return '';
@@ -270,9 +291,15 @@
       if (action === 'refMenu') { this.openMenu({ ref: target.dataset.hkey }, event); return true; }
       if (action === 'commitMenu') { this.openMenu({ hash: target.dataset.hash }, event); return true; }
       this.menu = undefined;
+      if (action === 'closePullReview') { this.pullReview = undefined; this.load(); return true; }
+      if (action === 'toggleContainingBranches') {
+        this.showContainingBranches = !this.showContainingBranches;
+        this.host.redraw();
+        return true;
+      }
       if (action === 'selectCommit') { this.selectCommit(target.dataset.hash, event.metaKey || event.ctrlKey); return true; }
       if (action === 'filterRef') { this.choose(target.dataset.hkey); return true; }
-      if (action === 'compareBranch') { this.refs = [this.wire(ref)]; this.compareMode = { ref: this.wire(ref), direction: 'incoming' }; this.save(); this.load(); return true; }
+      if (action === 'compareBranch') { this.pullReview = undefined; this.refs = [this.wire(ref)]; this.compareMode = { ref: this.wire(ref), direction: 'incoming' }; this.save(); this.load(); return true; }
       if (action === 'incoming' || action === 'outgoing') { if (this.compareMode) { this.compareMode.direction = action; this.save(); this.load(); } return true; }
       if (action === 'branchFiles') { this.revisionComparison = undefined; this.showComparison = true; this.host.redraw(); return true; }
       if (action === 'closeComparison') { this.showComparison = false; this.host.redraw(); return true; }

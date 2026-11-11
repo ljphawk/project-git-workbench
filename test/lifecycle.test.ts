@@ -473,6 +473,44 @@ test('inactive branch Pull stays bound to its original repository and preserves 
   } finally { f.dispose(); }
 });
 
+test('current branch Pull offers a repository-pinned review of only the newly integrated commits', async t => {
+  const [repo, other] = await shelfFixture(t), f = fixture();
+  try {
+    const before = (await repo.head())!.hash;
+    await repo.createBranch('incoming');
+    await fs.writeFile(path.join(repo.root, 'a.txt'), 'incoming change');
+    await repo.commit(['a.txt'], 'incoming change');
+    const after = (await repo.head())!.hash;
+    await repo.switchBranch('main');
+    await repo.run(['branch', '--set-upstream-to=incoming', 'main']);
+    await f.commands.get('projectGit.openResource')!({ scheme: 'file', fsPath: repo.root });
+
+    let offered = 0;
+    f.vscode.window.showInformationMessage = (async (message: string, action?: string) => {
+      if (!action) return;
+      offered++;
+      assert.match(message, /main.*1 条新提交/);
+      assert.equal(action, '查看提交');
+      assert.match(message, /incoming change/);
+      await fs.writeFile(path.join(repo.root, 'a.txt'), 'later local change');
+      await repo.commit(['a.txt'], 'later local change');
+      await f.commands.get('projectGit.openResource')!({ scheme: 'file', fsPath: other.root });
+      return action;
+    }) as typeof f.vscode.window.showInformationMessage;
+    await f.provider.handle({ type: 'pull', root: repo.root });
+    const review = f.panel.messages.at(-1).pullReview;
+    assert.equal(review.root, repo.root);
+    assert.equal(review.range.before, before);
+    assert.equal(review.range.after, after);
+    assert.equal(review.count, 1);
+    await f.provider.handle({ type: 'history', root: repo.root, requestId: 42, query: { range: review.range } }, f.panel.webview);
+    assert.deepEqual(f.panel.messages.at(-1).result.commits.map((commit: { hash: string }) => commit.hash), [after]);
+    await f.provider.handle({ type: 'pull', root: repo.root });
+    assert.equal(offered, 1, 'An up-to-date pull must not offer another review');
+    assert.deepEqual(f.errors, []);
+  } finally { f.dispose(); }
+});
+
 test('cancelling inactive branch Pull or changing upstream during its confirmation never moves its ref', async t => {
   const [repo] = await shelfFixture(t), f = fixture();
   try {

@@ -2,7 +2,7 @@
   "name": "project-git-workbench",
   "displayName": "Project Git",
   "description": "A repository-focused Git workbench for folders containing many independent projects.",
-  "version": "0.4.7",
+  "version": "0.4.9",
   "publisher": "local-dev",
   "license": "MIT",
   "engines": {
@@ -216,5 +216,9 @@
         "contents": "当前项目没有本地更改。"
       }
     ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ljphawk/project-git-workbench.git"
   }
 }

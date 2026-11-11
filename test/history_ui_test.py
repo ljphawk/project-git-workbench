@@ -119,8 +119,15 @@ with tempfile.TemporaryDirectory(prefix='pg-history-ui-') as temp, sync_playwrig
     # Details and native diff, two-commit comparison and delayed-response isolation.
     page.locator('.history-log-row').first.click()
     req = latest(page,'commitDetails')
-    reply(page,req,{'hash':'a'*40,'author':'Junpeng','email':'test@invalid','message':'Full subject\n\nDetailed body <img src=x>', 'files':[SNAPSHOT['changes'][0]]},'commitDetails')
+    reply(page,req,{'hash':'a'*40,'author':'Junpeng','email':'test@invalid','branches':['HEAD','main','origin/main'],'message':'Full subject\n\nDetailed body <img src=x>', 'files':[SNAPSHOT['changes'][0]]},'commitDetails')
     expect(page.locator('.history-commit-message')).to_contain_text('Detailed body <img src=x>')
+    expect(page.get_by_text('In 3 branches', exact=True)).to_be_visible()
+    branches = page.locator('#history-containing-branches')
+    expect(branches).to_be_hidden()
+    page.get_by_role('button', name='Show', exact=True).click()
+    expect(branches.locator('li')).to_have_text(['HEAD','main','origin/main'])
+    page.get_by_role('button', name='Hide', exact=True).click()
+    expect(branches).to_be_hidden()
     assert page.locator('img').count() == 0
     divider = page.get_by_role('separator', name='调整提交详情高度')
     details = page.locator('.history-details')
@@ -181,6 +188,27 @@ with tempfile.TemporaryDirectory(prefix='pg-history-ui-') as temp, sync_playwrig
     expect(page.locator('.history-log-row')).to_have_count(0)
     history_reply(page,[])
     state(page,snapshot)
+    history_reply(page)
+    # Pull review opens Log with a pinned range and uses the normal commit details and diff.
+    pulled = {'id':'pull-1','branch':'dev','count':2,'range':{'before':'c'*40,'after':'a'*40}}
+    state(page,snapshot,pullReview=pulled)
+    expect(page.locator('#tab-log')).to_have_attribute('aria-selected', 'true')
+    expect(page.get_by_text('本次 Pull · dev · 2 条新提交')).to_be_visible()
+    assert latest(page,'history')['query']['range'] == pulled['range']
+    history_reply(page,SNAPSHOT['commits'][:1],more=True)
+    page.locator('[data-hact="more"]').click()
+    assert latest(page,'history')['query']['range'] == pulled['range']
+    assert latest(page,'history')['query']['skip'] == 1
+    history_reply(page,SNAPSHOT['commits'][1:2])
+    page.locator('.history-log-row').first.click()
+    request = latest(page,'commitDetails')
+    reply(page,request,{'hash':'a'*40,'message':'Pulled change','files':[SNAPSHOT['changes'][0]]},'commitDetails')
+    page.locator('[data-hact="fileDiff"]').click()
+    assert latest(page,'diff')['hash'] == 'a'*40
+    page.get_by_role('button',name='返回完整 Log').click()
+    assert 'range' not in latest(page,'history')['query']
+    state(page,snapshot,pullReview=pulled)
+    expect(page.get_by_text('本次 Pull · dev · 2 条新提交')).not_to_be_visible()
     history_reply(page)
     # Sidebar remains usable without widening VS Code.
     page.set_viewport_size({'width':340,'height':800})

@@ -2,11 +2,14 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Repository } from './git';
-import { HistoryService, GitRef } from './history';
+import { HistoryService, GitRef, CommitRange } from './history';
 
 export interface GitOperation { type: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'am'; conflicts: boolean }
 export interface BranchPullPlan { branch: string; full: string; hash: string; upstream: string; remote: string; remoteRef: string }
-export interface BranchPullResult { branch: string; status: 'fast-forward' | 'up-to-date' | 'local-ahead' }
+export type BranchPullResult = { branch: string } & (
+  { status: 'fast-forward'; range: CommitRange } |
+  { status: 'up-to-date' | 'local-ahead' }
+);
 export class GitActions {
   constructor(private repo: Repository) {}
 
@@ -88,7 +91,7 @@ export class GitActions {
       // Git enforces fast-forward and refuses branches checked out in any
       // worktree. Never bypass that guard with update-head-ok or force.
       await this.repo.run([...options, '--', '.', `${temporary}:${plan.full}`]);
-      return { branch: plan.branch, status: 'fast-forward' };
+      return { branch: plan.branch, status: 'fast-forward', range: { before: plan.hash, after: fetched } };
     } finally {
       await this.repo.run(['update-ref', '-d', temporary]).catch(() => {});
     }

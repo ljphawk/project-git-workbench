@@ -94,6 +94,20 @@ test('history details retain full commit messages and filtering validates untrus
   await assert.rejects(service.query({ after: 'yesterday' }), /日期/);
 });
 
+test('commit details list containing branches and HEAD without tags or symbolic remote aliases', async t => {
+  const { repo, commit, initial } = await historyFixture(t);
+  const hash = await commit('file.txt', 'reviewed', 'Reviewed commit');
+  const tip = await commit('file.txt', 'later', 'Branch tip');
+  await repo.run(['branch', 'older', initial]);
+  await repo.run(['tag', 'release', hash]);
+  await repo.run(['update-ref', 'refs/remotes/origin/main', tip]);
+  await repo.run(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main']);
+  const history = new HistoryService(repo);
+  assert.deepEqual((await history.details(hash)).branches, ['HEAD', 'main', 'origin/main']);
+  await repo.switchBranch('older');
+  assert.deepEqual((await history.details(hash)).branches, ['main', 'origin/main']);
+});
+
 test('structured history ignores display configuration and rejects normalized invalid dates', async t => {
   const { repo, initial } = await historyFixture(t), service = new HistoryService(repo);
   await repo.run(['config', 'log.showSignature', 'true']);

@@ -5,8 +5,8 @@ import { promises as fs } from 'node:fs';
 import { Repository, Snapshot, discoverRepositories, findRepository, Change, runGit, parseStatus } from './git';
 import { ShelfStore } from './shelf';
 import { explorerSelection } from './explorer-selection';
-import { HistoryService, HistoryQuery, GitRef, refKey } from './history';
-import { GitActions, GitOperation } from './git-actions';
+import { HistoryService, HistoryQuery, CommitRange, GitRef, refKey } from './history';
+import { GitActions, GitOperation, BranchPullResult } from './git-actions';
 import { confirmationDetail, dialogLine, discardSummary } from './dialog';
 import { remoteAddresses } from './remotes';
 import { diffFiles } from './diff-list';
@@ -15,6 +15,8 @@ import { LocalChanges } from './local-changes';
 
 type Message = { type: string; root?: string; paths?: string[]; files?: string[]; path?: string; hash?: string; name?: string; message?: string; amend?: boolean; expectedHead?: string; id?: string; requestId?: number; query?: HistoryQuery; ref?: GitRef; from?: string; to?: string; operation?: GitOperation['type'] };
 
+type PullReview = { id: string; branch: string; count: number; range: CommitRange; root: string };
+
 class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
   private views = new Set<vscode.Webview>();
   private navigation = new DiffNavigation(vscode, error => this.report(error), () => this.updateDiffContext());
@@ -22,6 +24,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
   private disposed = false;
   private sidebar?: vscode.WebviewView;
   private panel?: vscode.WebviewPanel;
+  private pullReviews = new WeakMap<vscode.Webview, PullReview>();
   private repository?: Repository;
   private snapshot?: Snapshot;
   private roots = new Set<string>();
@@ -353,7 +356,10 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
   private broadcast(): void {
     const favoriteRefs = this.context.workspaceState.get<Record<string, string[]>>('favoriteRefs') ?? {};
     const state = { type: 'state', snapshot: this.snapshot, root: this.repository?.root, loading: this.loading, busy: this.busy, error: this.error, favorites: this.repository ? favoriteRefs[this.repository.root] ?? [] : [], historyPageSize: vscode.workspace.getConfiguration('projectGit').get<number>('logLimit', 150) };
-    this.postToViews(state);
+    for (const view of this.views) {
+      const review = this.pullReviews.get(view);
+      this.respond(view, { ...state, pullReview: review?.root === state.root ? review : undefined });
+    }
   }
 
   private report(error: unknown): void {
@@ -434,6 +440,32 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     await this.openDiffFiles(repo, `${hash ? hash.slice(0, 8) : 'Local changes'} · ${path.basename(repo.root)}`, resources);
   }
 
+  private async notifyPull(repo: Repository, result: BranchPullResult): Promise<void> {
+    const title = `${path.basename(repo.root)} · ${result.branch}`;
+    if (result.status !== 'fast-forward') {
+      if (!this.disposed) void vscode.window.showInformationMessage(`${title}：${result.status === 'local-ahead' ? '本地领先上游，无需拉取，已有提交保留' : '没有新增提交'}`);
+      return;
+    }
+    const history = new HistoryService(repo);
+    const [count, preview] = await Promise.all([
+      history.countRange(result.range).catch(() => undefined),
+      history.query({ range: result.range, limit: 2 }).catch(() => undefined),
+    ]);
+    if (this.disposed) return;
+    if (!count) {
+      void vscode.window.showInformationMessage(`${title}：Pull 完成，${count === 0 ? '没有新增提交' : '无法读取新增提交'}`);
+      return;
+    }
+    const action = '查看提交';
+    const subjects = preview?.commits.map(commit => `${commit.hash.slice(0, 8)} ${dialogLine(commit.subject, 48)}`).join(' · ');
+    const summary = subjects ? ` · ${subjects}${preview?.hasMore ? ' …' : ''}` : '';
+    if (await vscode.window.showInformationMessage(`${title}：拉取到 ${count} 条新提交${summary}`, action) !== action || this.disposed) return;
+    await this.open(vscode.Uri.file(repo.root));
+    if (this.disposed || this.repository?.root !== repo.root || !this.panel) return;
+    this.pullReviews.set(this.panel.webview, { id: randomBytes(12).toString('hex'), branch: result.branch, root: repo.root, count, range: result.range });
+    this.broadcast();
+  }
+
   private async handle(message: Message, source?: vscode.Webview): Promise<void> {
     if (this.disposed || !message || typeof message.type !== 'string') return;
     if (message.type === 'ready') { this.broadcast(); return; }
@@ -503,6 +535,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     const paths = Array.isArray(message.paths) ? message.paths : [];
     this.busy = true; this.error = ''; this.broadcast();
     let completed = false;
+    let pullResult: BranchPullResult | undefined;
     try {
       await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Project Git · ${path.basename(repo.root)}` }, async () => {
         if (['switch', 'merge', 'rebase', 'checkoutCommit', 'cherryPick', 'revertCommit', 'resetCommit'].includes(message.type) && vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.scheme === 'file' && this.contains(repo.root, document.uri.fsPath))) {
@@ -554,13 +587,26 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
             await repo.discard(paths, changes); break;
           }
           case 'fetch': await repo.run(['fetch', '--all', '--prune']); break;
-          case 'pull': await repo.run(['pull', '--ff-only']); break;
+          case 'pull': {
+            const readTip = async () => {
+              const ref = (await repo.run(['symbolic-ref', '--quiet', 'HEAD'], [0, 1])).trim();
+              const hash = (await repo.run(['rev-parse', '--verify', 'HEAD^{commit}'], [0, 128])).trim() || undefined;
+              return { ref, hash };
+            };
+            const before = await readTip();
+            await repo.run(['pull', '--ff-only']);
+            const after = await readTip();
+            const branch = before.ref.replace(/^refs\/heads\//, '') || 'HEAD';
+            pullResult = before.ref === after.ref && after.hash && before.hash !== after.hash
+              ? { branch, status: 'fast-forward', range: { before: before.hash, after: after.hash } }
+              : { branch, status: 'up-to-date' };
+            break;
+          }
           case 'pullBranch': {
             if (!message.ref) throw new Error('请选择本地分支。');
             const plan = await actions.branchPullPlan(message.ref);
             if (!await this.confirm(repo, 'Pull 到所选分支', `目标：${plan.branch} · ${plan.hash.slice(0, 8)}\n上游：${plan.remote} / ${plan.remoteRef.replace(/^refs\/heads\//, '')}\n只快进目标分支，不切换当前分支，也不修改当前工作区。`)) return;
-            const result = await actions.pullBranch(message.ref, plan);
-            if (!this.disposed) void vscode.window.showInformationMessage(`${path.basename(repo.root)} · ${result.branch}：${result.status === 'fast-forward' ? 'Pull 完成（已快进）' : result.status === 'local-ahead' ? '本地领先上游，无需拉取，已有提交保留' : '已是最新'}`);
+            pullResult = await actions.pullBranch(message.ref, plan);
             break;
           }
           case 'push': {
@@ -685,7 +731,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
       });
       if (completed && !this.disposed) {
         this.postToViews({ type: 'completed', action: message.type, root: repo.root });
-        if (message.type !== 'pullBranch') void vscode.window.showInformationMessage(`${path.basename(repo.root)}：${({ commit: '提交完成', stage: '已加入暂存区（尚未提交）', unstage: '已取消暂存，本地修改已保留', shelve: '修改已搁置到 Shelf', unshelve: 'Shelf 已恢复，备份已保留', deleteShelf: 'Shelf 备份已删除', push: '推送完成', pushTag: '标签推送完成', pull: '拉取完成', fetch: '获取完成' } as Record<string, string>)[message.type] || '操作完成'}`);
+        if (!pullResult) void vscode.window.showInformationMessage(`${path.basename(repo.root)}：${({ commit: '提交完成', stage: '已加入暂存区（尚未提交）', unstage: '已取消暂存，本地修改已保留', shelve: '修改已搁置到 Shelf', unshelve: 'Shelf 已恢复，备份已保留', deleteShelf: 'Shelf 备份已删除', push: '推送完成', pushTag: '标签推送完成', fetch: '获取完成' } as Record<string, string>)[message.type] || '操作完成'}`);
       }
     } catch (error) { this.report(new Error(`${repo.root}\n${error instanceof Error ? error.message : String(error)}`)); }
     finally {
@@ -696,6 +742,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
       await this.refresh();
       if (!completed && operationError) { this.error = operationError; this.broadcast(); }
     }
+    if (completed && pullResult) await this.notifyPull(repo, pullResult).catch(error => this.report(error));
   }
 
   dispose(): void {
