@@ -42,6 +42,10 @@ with tempfile.TemporaryDirectory(prefix='pg-toolbar-', dir='/tmp') as temp, sync
     (extension/'package.json').write_text(json.dumps(package))
     settings = base/'user-data/User'; settings.mkdir(parents=True)
     (settings/'settings.json').write_text(json.dumps({'chat.disableAIFeatures':True,'telemetry.telemetryLevel':'off','extensions.autoUpdate':False,'workbench.startupEditor':'none'}))
+    vim = os.environ.get('PROJECT_GIT_TEST_VIM')
+    if vim:
+        extension_path = Path(vim)
+        shutil.copytree(extension_path, base / 'extensions' / extension_path.name)
     with socket.socket() as sock:
         sock.bind(('127.0.0.1',0)); port = sock.getsockname()[1]
     env = {k:v for k,v in os.environ.items() if k != 'ELECTRON_RUN_AS_NODE'}
@@ -100,6 +104,21 @@ with tempfile.TemporaryDirectory(prefix='pg-toolbar-', dir='/tmp') as temp, sync
             expect(previous).not_to_be_visible(); expect(following).not_to_be_visible()
             (workspace/'toolbar-signal').write_text('reopen'); poll_state(workspace,'a-nav.txt',3)
             expect(page.locator('.part.sidebar')).to_contain_text('Local Changes')
+            following.click(); poll_state(workspace,'a-nav.txt',30)
+            # Send the physical key through VS Code's keybinding resolver.
+            diff_tab = page.get_by_role('tab', name=re.compile('a-nav.txt.*Local changes', re.I))
+            (workspace/'toolbar-signal').write_text('focusLocalChanges')
+            expect(page.locator('.part.sidebar .monaco-list:focus')).to_have_count(1, timeout=3000)
+            page.keyboard.press('Escape')
+            expect(diff_tab).to_have_count(0, timeout=3000)
+            expect(page.locator('.part.sidebar')).to_contain_text('Explorer')
+            (workspace/'toolbar-signal').write_text('reopen'); poll_state(workspace,'a-nav.txt',3)
+            page.keyboard.press('Meta+1')
+            expect(page.locator('.monaco-diff-editor .monaco-editor.focused')).to_have_count(1, timeout=3000)
+            page.keyboard.press('Escape')
+            expect(diff_tab).to_have_count(0, timeout=3000)
+            expect(page.locator('.part.sidebar')).to_contain_text('Explorer')
+            (workspace/'toolbar-signal').write_text('reopenAfterEscape'); poll_state(workspace,'a-nav.txt',3)
             following.click(); poll_state(workspace,'a-nav.txt',30)
             (workspace/'toolbar-signal').write_text('done')
             deadline = time.monotonic() + 20

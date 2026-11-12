@@ -93,9 +93,10 @@ export async function run(): Promise<void> {
       if (value === 'done') break;
       if (value !== lastSignal) {
         lastSignal = value;
+        if (value === 'focusLocalChanges') await vscode.commands.executeCommand('projectGit.localChanges.focus');
         if (value === 'search') await vscode.commands.executeCommand('workbench.view.search');
         if (value === 'ordinary') await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(path.join(android, 'file.txt')));
-        if (value === 'reopen') await vscode.commands.executeCommand('projectGit.showChanges', vscode.Uri.file(path.join(android, 'a-nav.txt')));
+        if (value === 'reopen' || value === 'reopenAfterEscape') await vscode.commands.executeCommand('projectGit.showChanges', vscode.Uri.file(path.join(android, 'a-nav.txt')));
       }
       const next = value === 'extra';
       if (next !== extra) { extra = next; await vscode.commands.executeCommand('setContext', 'projectGit.toolbarTestExtra', extra); }
