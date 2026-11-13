@@ -33,3 +33,13 @@ h2 {
 }
 img { max-width: 100%; max-height: 100%; object-fit: contain; }
 p { color: var(--vscode-descriptionForeground, #888); text-align: center; }
+footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--vscode-panel-border, #80808055);
+  color: var(--vscode-descriptionForeground, #888);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}

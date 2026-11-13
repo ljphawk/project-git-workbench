@@ -11,7 +11,34 @@ const imageTypes = new Map([
 const maxImageBytes = 16 * 1024 * 1024;
 export const isImage = (file: string): boolean => imageTypes.has(path.extname(file).toLowerCase());
 
-export async function imageData(repo: Repository, uri?: vscode.Uri): Promise<string | undefined> {
+interface ImageData {
+  src: string;
+  bytes: number;
+  type: '位图' | '矢量图';
+  depth?: string;
+}
+
+function imageDepth(mime: string, bytes: Buffer): string | undefined {
+  if (mime === 'image/png' && bytes.length >= 33 &&
+      bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) &&
+      bytes.readUInt32BE(8) === 13 && bytes.toString('ascii', 12, 16) === 'IHDR') {
+    const depth = bytes[24];
+    if ([1, 2, 4, 8, 16].includes(depth)) return `${depth} bit/${bytes[25] === 3 ? '索引' : '通道'}`;
+  }
+  if (mime === 'image/bmp' && bytes.length >= 54 && bytes.toString('ascii', 0, 2) === 'BM' &&
+      [40, 52, 56, 108, 124].includes(bytes.readUInt32LE(14))) {
+    const depth = bytes.readUInt16LE(28);
+    if ([1, 4, 8, 16, 24, 32].includes(depth)) return `${depth} bit/像素`;
+  }
+}
+
+function imageSize(bytes: number): string {
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(2)} MB`;
+  if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(2)} KB`;
+  return `${bytes} B`;
+}
+
+export async function imageData(repo: Repository, uri?: vscode.Uri): Promise<ImageData | undefined> {
   if (!uri) return undefined;
   const mime = imageTypes.get(path.extname(uri.path).toLowerCase());
   if (!mime) throw new Error('此版本的文件格式不支持图片预览。');
@@ -45,14 +72,25 @@ export async function imageData(repo: Repository, uri?: vscode.Uri): Promise<str
     bytes = await repo.runBytes(['cat-file', 'blob', `${ref}:${file}`]);
   }
   if (bytes.length > maxImageBytes) throw new Error('图片预览支持每侧最多 16 MiB。');
-  return `data:${mime};base64,${bytes.toString('base64')}`;
+  return {
+    src: `data:${mime};base64,${bytes.toString('base64')}`,
+    bytes: bytes.length,
+    type: mime === 'image/svg+xml' ? '矢量图' : '位图',
+    depth: imageDepth(mime, bytes),
+  };
 }
 
-export function imageDiffHtml(cspSource: string, css: vscode.Uri, nonce: string, before?: string, after?: string): string {
-  const pane = (label: string, image: string | undefined, empty: string) => `
+export function imageDiffHtml(cspSource: string, css: vscode.Uri, nonce: string, before?: ImageData, after?: ImageData): string {
+  const pane = (label: string, image: ImageData | undefined, empty: string) => `
     <section aria-label="${label}">
       <h2>${label}</h2>
-      <div class="preview">${image ? `<img src="${image}" alt="${label}">` : `<p>${empty}</p>`}</div>
+      <div class="preview">${image ? `<img src="${image.src}" alt="${label}">` : `<p>${empty}</p>`}</div>
+      ${image ? `<footer aria-label="图片信息">
+        <span class="dimensions" aria-live="polite">正在读取尺寸…</span>
+        <span title="${image.bytes} 字节">${imageSize(image.bytes)}</span>
+        <span>${image.type}</span>
+        ${image.depth ? `<span>${image.depth}</span>` : ''}
+      </footer>` : ''}
     </section>`;
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -65,11 +103,22 @@ export function imageDiffHtml(cspSource: string, css: vscode.Uri, nonce: string,
         if (event.key === 'Escape') vscode.postMessage({ type: 'close' });
       });
       for (const image of document.images) {
-        image.addEventListener('error', () => {
+        const dimensions = image.closest('section').querySelector('.dimensions');
+        const updateDimensions = () => {
+          if (image.naturalWidth && image.naturalHeight) {
+            dimensions.textContent = image.naturalWidth + ' × ' + image.naturalHeight + ' px';
+            return;
+          }
+          dimensions.textContent = '尺寸不可用';
           const message = document.createElement('p');
           message.textContent = '无法预览此图片，请检查文件内容或格式。';
           image.replaceWith(message);
-        });
+        };
+        if (image.complete) updateDimensions();
+        else {
+          image.addEventListener('load', updateDimensions, { once: true });
+          image.addEventListener('error', updateDimensions, { once: true });
+        }
       }
     </script></body></html>`;
 }
