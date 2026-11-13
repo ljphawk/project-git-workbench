@@ -2,7 +2,7 @@
   "name": "project-git-workbench",
   "displayName": "Project Git",
   "description": "A repository-focused Git workbench for folders containing many independent projects.",
-  "version": "0.4.12",
+  "version": "0.4.13",
   "publisher": "local-dev",
   "license": "MIT",
   "engines": {

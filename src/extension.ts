@@ -20,7 +20,7 @@ type PullReview = { id: string; branch: string; count: number; range: CommitRang
 
 class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
   private views = new Set<vscode.Webview>();
-  private navigation = new DiffNavigation(vscode, error => this.report(error), () => this.updateDiffContext());
+  private navigation = new DiffNavigation(vscode, error => this.report(error), () => this.updateDiffContext(), () => !!this.imagePanel?.active);
   private messageListeners = new Map<vscode.Webview, vscode.Disposable>();
   private disposed = false;
   private sidebar?: vscode.WebviewView;
@@ -53,12 +53,10 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     this.status.command = 'projectGit.open';
     this.previousChange.text = '$(arrow-up) 上一处';
     this.previousChange.name = 'Project Git: 上一处修改';
-    this.previousChange.tooltip = '上一处修改；到文件开头后切换上一个文件';
     this.previousChange.command = 'projectGit.previousDiffChange';
     this.previousChange.accessibilityInformation = { label: 'Project Git: 上一处修改（跨文件）' };
     this.nextChange.text = '$(arrow-down) 下一处';
     this.nextChange.name = 'Project Git: 下一处修改';
-    this.nextChange.tooltip = '下一处修改；到文件末尾后切换下一个文件';
     this.nextChange.command = 'projectGit.nextDiffChange';
     this.nextChange.accessibilityInformation = { label: 'Project Git: 下一处修改（跨文件）' };
     this.timer = setInterval(() => {
@@ -102,6 +100,9 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     if (restoreSidebar && !this.disposed) void this.restoreSidebar().catch(error => this.report(error));
     const managed = !this.disposed && this.navigation.managed;
     void vscode.commands.executeCommand('setContext', 'projectGit.diffNavigation', managed);
+    const image = this.imagePanel?.active;
+    this.previousChange.tooltip = image ? '切换到上一个文件' : '上一处修改；到文件开头后切换上一个文件';
+    this.nextChange.tooltip = image ? '切换到下一个文件' : '下一处修改；到文件末尾后切换下一个文件';
     for (const item of [this.previousChange, this.nextChange]) managed ? item.show() : item.hide();
     if (!this.disposed) void this.syncDiffSidebar(enteringDiff).catch(error => this.report(error));
   }
@@ -141,7 +142,11 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     const selected = this.localChanges.items.find(item => item.change.path === file);
     if (selected && (reveal || this.changesView.visible)) {
       this.sidebarBorrowed = true;
-      await this.changesView.reveal(selected, { select: true, focus: false });
+      try {
+        await this.changesView.reveal(selected, { select: true, focus: false });
+      } catch (error) {
+        if (ticket === this.sidebarRead && this.activeDiffTab()?.input === input && this.localChanges.items.includes(selected)) throw error;
+      }
     }
     else if (reveal) {
       this.sidebarBorrowed = true;
@@ -386,10 +391,11 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     return true;
   }
 
-  private async openImageDiff(repo: Repository, title: string, left?: vscode.Uri, right?: vscode.Uri): Promise<void> {
+  private async openImageDiff(repo: Repository, title: string, left?: vscode.Uri, right?: vscode.Uri): Promise<boolean> {
+    if (!left && !right) throw new Error('两个版本都没有图片内容。');
     const request = ++this.imageRequest;
     const [before, after] = await Promise.all([imageData(repo, left), imageData(repo, right)]);
-    if (this.disposed || request !== this.imageRequest) return;
+    if (this.disposed || request !== this.imageRequest) return false;
     const media = vscode.Uri.joinPath(this.context.extensionUri, 'media');
     const panel = this.imagePanel ?? vscode.window.createWebviewPanel(
       'projectGit.imageDiff', title, vscode.ViewColumn.Active,
@@ -400,31 +406,34 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
       const listener = panel.webview.onDidReceiveMessage(message => {
         if (message?.type === 'close') panel.dispose();
       });
+      const viewState = panel.onDidChangeViewState(() => this.updateDiffContext());
       panel.onDidDispose(() => {
         if (this.imagePanel === panel) {
           this.imagePanel = undefined;
           ++this.imageRequest;
         }
         listener.dispose();
+        viewState.dispose();
+        this.updateDiffContext();
       });
     }
     panel.title = title;
     const css = panel.webview.asWebviewUri(vscode.Uri.joinPath(media, 'image-diff.css'));
     panel.webview.html = imageDiffHtml(panel.webview.cspSource, css, randomBytes(18).toString('hex'), before, after);
     panel.reveal();
+    return true;
   }
 
   private async openDiffFiles(repo: Repository, title: string, resources: [vscode.Uri, vscode.Uri | undefined, vscode.Uri | undefined][]): Promise<void> {
-    const [first, left, right] = resources[0];
-    if (isImage(first.path)) {
-      if (!left && !right) throw new Error('两个版本都没有图片内容。');
-      await this.openImageDiff(repo, `${path.basename(first.fsPath)} · ${title}`, left, right);
-      return;
-    }
     ++this.imageRequest;
-    await this.navigation.open(title, resources.filter(([resource]) => !isImage(resource.path)).map(([resource, left, right]) => {
+    await this.navigation.open(title, resources.map(([resource, left, right]) => {
       const file = path.relative(repo.root, resource.fsPath).split(path.sep).join('/');
-      return { name: path.basename(file), original: left ?? this.content(repo, file, 'empty'), modified: right ?? this.content(repo, file, 'empty') };
+      return {
+        name: path.basename(file),
+        original: left ?? this.content(repo, file, 'empty'),
+        modified: right ?? this.content(repo, file, 'empty'),
+        openImage: isImage(resource.path) ? imageTitle => this.openImageDiff(repo, imageTitle, left, right) : undefined,
+      };
     }));
     await this.syncDiffSidebar(true);
   }

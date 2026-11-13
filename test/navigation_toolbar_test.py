@@ -120,6 +120,16 @@ with tempfile.TemporaryDirectory(prefix='pg-toolbar-', dir='/tmp') as temp, sync
             expect(page.locator('.part.sidebar')).to_contain_text('Explorer')
             (workspace/'toolbar-signal').write_text('reopenAfterEscape'); poll_state(workspace,'a-nav.txt',3)
             following.click(); poll_state(workspace,'a-nav.txt',30)
+            (workspace/'toolbar-signal').write_text('imageNavigation')
+            image_tab = page.get_by_role('tab', name=re.compile('z-nav.png.*Local changes', re.I))
+            expect(image_tab).to_have_attribute('aria-selected', 'true')
+            expect(previous).to_be_visible(); expect(following).to_be_visible()
+            following.click(); poll_state(workspace,'a-nav.txt',3)
+            previous.click()
+            expect(image_tab).to_have_attribute('aria-selected', 'true')
+            previous.click(); poll_state(workspace,'b-nav.txt',30)
+            (workspace/'toolbar-signal').write_text('finishImageNavigation'); poll_state(workspace,'a-nav.txt',3)
+            following.click(); poll_state(workspace,'a-nav.txt',30)
             (workspace/'toolbar-signal').write_text('done')
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:

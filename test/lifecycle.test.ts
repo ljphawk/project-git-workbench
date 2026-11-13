@@ -40,7 +40,7 @@ function fixture() {
     return {
       get webview() { if (disposed) throw new Error('Webview is disposed'); return webview; },
       get visible() { if (disposed) throw new Error('Webview is disposed'); return true; },
-      reveal() {}, onDidChangeVisibility: disposable,
+      reveal() {}, onDidChangeVisibility: disposable, onDidChangeViewState: disposable,
       messages, get posts() { return posts; }, get subscriptions() { return subscriptions; },
       failPosts(mode: string) { failure = mode; },
       onDidDispose: (listener: () => void) => { listeners.push(listener); return disposable(); },

@@ -93,6 +93,15 @@ export async function run(): Promise<void> {
       if (value === 'done') break;
       if (value !== lastSignal) {
         lastSignal = value;
+        if (value === 'imageNavigation') {
+          const image = path.join(android, 'z-nav.png');
+          await fs.writeFile(image, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF9sAAAAASUVORK5CYII=', 'base64'));
+          await vscode.commands.executeCommand('projectGit.showChanges', vscode.Uri.file(image));
+        }
+        if (value === 'finishImageNavigation') {
+          await fs.unlink(path.join(android, 'z-nav.png'));
+          await vscode.commands.executeCommand('projectGit.showChanges', vscode.Uri.file(path.join(android, 'a-nav.txt')));
+        }
         if (value === 'focusLocalChanges') await vscode.commands.executeCommand('projectGit.localChanges.focus');
         if (value === 'search') await vscode.commands.executeCommand('workbench.view.search');
         if (value === 'ordinary') await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(path.join(android, 'file.txt')));

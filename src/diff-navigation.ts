@@ -1,6 +1,6 @@
 import type * as VSCode from 'vscode';
 
-export interface DiffResource { original: VSCode.Uri; modified: VSCode.Uri; name: string }
+export interface DiffResource { original: VSCode.Uri; modified: VSCode.Uri; name: string; openImage?: (title: string) => Promise<boolean> }
 interface Sequence { title: string; resources: DiffResource[] }
 interface Session { sequence: Sequence; index: number; readyVersion?: string }
 type Direction = 'next' | 'previous';
@@ -10,25 +10,26 @@ const commands: Record<Direction, string> = { next: 'workbench.action.compareEdi
  * boundary handling while an explicitly registered Project Git diff is active. */
 export class DiffNavigation {
   private sessions = new Map<string, Session>();
+  private imageSession?: Session;
   private handlers: VSCode.Disposable[] = [];
   private nativeDepth = 0;
   private disposed = false;
   private pending: Promise<void> = Promise.resolve();
   private ticket = 0;
   private registrationFailed = false;
-  constructor(private api: typeof VSCode, private onError: (error: unknown) => void, private onStateChange?: () => void) {}
+  constructor(private api: typeof VSCode, private onError: (error: unknown) => void, private onStateChange?: () => void, private isImageActive = () => false) {}
 
   private key(original: VSCode.Uri, modified: VSCode.Uri): string { return JSON.stringify([original.toString(), modified.toString()]); }
   private activeKey(): string | undefined {
     const input = this.api.window.tabGroups.activeTabGroup.activeTab?.input;
     return input instanceof this.api.TabInputTextDiff ? this.key(input.original, input.modified) : undefined;
   }
-  private active(): Session | undefined { const key = this.activeKey(); return key ? this.sessions.get(key) : undefined; }
+  private active(): Session | undefined { if (this.isImageActive()) return this.imageSession; const key = this.activeKey(); return key ? this.sessions.get(key) : undefined; }
   get managed(): boolean { return !!this.active(); }
   private clearHandlers(): void { for (const handler of this.handlers.splice(0)) handler.dispose(); }
 
   update(): void {
-    if (this.disposed || this.nativeDepth || (this.active()?.sequence.resources.length ?? 0) < 2) { if (!this.nativeDepth) this.clearHandlers(); return; }
+    if (this.disposed || this.nativeDepth || this.isImageActive() || (this.active()?.sequence.resources.length ?? 0) < 2) { if (!this.nativeDepth) this.clearHandlers(); return; }
     if (this.handlers.length || this.registrationFailed) return;
     try {
       for (const direction of ['next', 'previous'] as const) {
@@ -40,7 +41,7 @@ export class DiffNavigation {
   request(direction: Direction, args: unknown[] = []): Promise<void> {
     const sequence = this.active()?.sequence;
     this.pending = this.pending.then(async () => {
-      if (sequence && this.active()?.sequence !== sequence) return;
+      if (this.active()?.sequence !== sequence) return;
       await this.navigate(direction, args);
     }).catch(this.onError);
     return this.pending;
@@ -116,11 +117,20 @@ export class DiffNavigation {
   private async openAt(sequence: Sequence, index: number, edge: Direction): Promise<void> {
     if (this.disposed) return;
     const ticket = ++this.ticket, resource = sequence.resources[index];
-    const key = this.key(resource.original, resource.modified);
     const session: Session = { sequence, index };
-    this.sessions.set(key, session);
     const count = sequence.resources.length > 1 ? ` · ${index + 1}/${sequence.resources.length}` : '';
-    await this.api.commands.executeCommand('vscode.diff', resource.original, resource.modified, `${resource.name} · ${sequence.title}${count}`, { preview: true });
+    const title = `${resource.name} · ${sequence.title}${count}`;
+    if (resource.openImage) {
+      if (await resource.openImage(title)) {
+        this.imageSession = session;
+        this.update();
+        this.onStateChange?.();
+      }
+      return;
+    }
+    const key = this.key(resource.original, resource.modified);
+    this.sessions.set(key, session);
+    await this.api.commands.executeCommand('vscode.diff', resource.original, resource.modified, title, { preview: true });
     if (this.disposed || ticket !== this.ticket || !this.current(session)) return;
     this.update();
     this.onStateChange?.();
@@ -131,10 +141,21 @@ export class DiffNavigation {
     await this.native(edge);
   }
 
+  private async openAdjacent(session: Session, direction: Direction): Promise<void> {
+    const count = session.sequence.resources.length;
+    if (count < 2) return;
+    const offset = direction === 'next' ? 1 : count - 1;
+    await this.openAt(session.sequence, (session.index + offset) % count, direction);
+  }
+
   private async navigate(direction: Direction, args: unknown[]): Promise<void> {
     const session = this.active();
     if (!session || this.disposed) { await this.native(direction, args); return; }
     const resource = session.sequence.resources[session.index];
+    if (resource.openImage) {
+      await this.openAdjacent(session, direction);
+      return;
+    }
     if (args.some(arg => typeof arg === 'object' && arg !== null && 'scheme' in arg && 'path' in arg && arg.toString() !== resource.original.toString() && arg.toString() !== resource.modified.toString())) { await this.native(direction, args); return; }
     if (!await this.ready(session) || !this.current(session)) { if (this.current(session)) await this.native(direction, args); return; }
     const editor = this.editor(session); if (!editor) { await this.native(direction, args); return; }
@@ -143,11 +164,8 @@ export class DiffNavigation {
     if (!this.current(session) || version !== this.version(session)) return;
     const after = editor.selection.active;
     const crossed = direction === 'next' ? after.line <= before.line : after.line >= before.line;
-    if (crossed && session.sequence.resources.length > 1) {
-      const count = session.sequence.resources.length;
-      await this.openAt(session.sequence, (session.index + (direction === 'next' ? 1 : count - 1)) % count, direction);
-    }
+    if (crossed) await this.openAdjacent(session, direction);
   }
 
-  dispose(): void { this.disposed = true; this.ticket++; this.clearHandlers(); this.sessions.clear(); }
+  dispose(): void { this.disposed = true; this.ticket++; this.clearHandlers(); this.sessions.clear(); this.imageSession = undefined; }
 }
