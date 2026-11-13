@@ -12,6 +12,7 @@ import { remoteAddresses } from './remotes';
 import { diffFiles } from './diff-list';
 import { DiffNavigation } from './diff-navigation';
 import { LocalChanges } from './local-changes';
+import { imageData, imageDiffHtml, isImage } from './image-diff';
 
 type Message = { type: string; root?: string; paths?: string[]; files?: string[]; path?: string; hash?: string; name?: string; message?: string; amend?: boolean; expectedHead?: string; id?: string; requestId?: number; query?: HistoryQuery; ref?: GitRef; from?: string; to?: string; operation?: GitOperation['type'] };
 
@@ -24,6 +25,8 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
   private disposed = false;
   private sidebar?: vscode.WebviewView;
   private panel?: vscode.WebviewPanel;
+  private imagePanel?: vscode.WebviewPanel;
+  private imageRequest = 0;
   private pullReviews = new WeakMap<vscode.Webview, PullReview>();
   private repository?: Repository;
   private snapshot?: Snapshot;
@@ -383,8 +386,43 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     return true;
   }
 
+  private async openImageDiff(repo: Repository, title: string, left?: vscode.Uri, right?: vscode.Uri): Promise<void> {
+    const request = ++this.imageRequest;
+    const [before, after] = await Promise.all([imageData(repo, left), imageData(repo, right)]);
+    if (this.disposed || request !== this.imageRequest) return;
+    const media = vscode.Uri.joinPath(this.context.extensionUri, 'media');
+    const panel = this.imagePanel ?? vscode.window.createWebviewPanel(
+      'projectGit.imageDiff', title, vscode.ViewColumn.Active,
+      { enableScripts: true, localResourceRoots: [media] },
+    );
+    if (!this.imagePanel) {
+      this.imagePanel = panel;
+      const listener = panel.webview.onDidReceiveMessage(message => {
+        if (message?.type === 'close') panel.dispose();
+      });
+      panel.onDidDispose(() => {
+        if (this.imagePanel === panel) {
+          this.imagePanel = undefined;
+          ++this.imageRequest;
+        }
+        listener.dispose();
+      });
+    }
+    panel.title = title;
+    const css = panel.webview.asWebviewUri(vscode.Uri.joinPath(media, 'image-diff.css'));
+    panel.webview.html = imageDiffHtml(panel.webview.cspSource, css, randomBytes(18).toString('hex'), before, after);
+    panel.reveal();
+  }
+
   private async openDiffFiles(repo: Repository, title: string, resources: [vscode.Uri, vscode.Uri | undefined, vscode.Uri | undefined][]): Promise<void> {
-    await this.navigation.open(title, resources.map(([resource, left, right]) => {
+    const [first, left, right] = resources[0];
+    if (isImage(first.path)) {
+      if (!left && !right) throw new Error('两个版本都没有图片内容。');
+      await this.openImageDiff(repo, `${path.basename(first.fsPath)} · ${title}`, left, right);
+      return;
+    }
+    ++this.imageRequest;
+    await this.navigation.open(title, resources.filter(([resource]) => !isImage(resource.path)).map(([resource, left, right]) => {
       const file = path.relative(repo.root, resource.fsPath).split(path.sep).join('/');
       return { name: path.basename(file), original: left ?? this.content(repo, file, 'empty'), modified: right ?? this.content(repo, file, 'empty') };
     }));
@@ -419,6 +457,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
   }
 
   private async diff(repo: Repository, file: string, hash?: string, visible?: string[]): Promise<void> {
+    if (hash) await new HistoryService(repo).requireCommit(hash);
     const all = hash ? await repo.commitFiles(hash) : parseStatus(await repo.run(['status', '--porcelain=v1', '-z', '--untracked-files=all']));
     const change = all.find(c => c.path === file);
     if (!change) throw new Error('文件不在此提交中。');
@@ -436,7 +475,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     }
     // A staged addition deleted from disk has two empty sides. Supply one
     // explicit empty document so VS Code still has a valid diff resource.
-    for (const item of resources) if (!item[1] && !item[2]) item[1] = this.content(repo, path.relative(repo.root, item[0].fsPath).split(path.sep).join('/'), 'empty');
+    for (const item of resources) if (!item[1] && !item[2] && !isImage(item[0].path)) item[1] = this.content(repo, path.relative(repo.root, item[0].fsPath).split(path.sep).join('/'), 'empty');
     await this.openDiffFiles(repo, `${hash ? hash.slice(0, 8) : 'Local changes'} · ${path.basename(repo.root)}`, resources);
   }
 
@@ -754,7 +793,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     clearInterval(this.timer);
     for (const view of this.views) this.detach(view);
     this.status.dispose(); this.previousChange.dispose(); this.nextChange.dispose();
-    this.changesView.dispose(); this.localChanges.dispose(); this.panel?.dispose();
+    this.changesView.dispose(); this.localChanges.dispose(); this.panel?.dispose(); this.imagePanel?.dispose();
     for (const disposable of this.disposables) disposable.dispose();
   }
 }

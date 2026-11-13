@@ -1,0 +1,35 @@
+body {
+  margin: 0;
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-background);
+  font-family: var(--vscode-font-family);
+}
+main {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  height: 100vh;
+}
+section {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+section + section { border-left: 1px solid var(--vscode-panel-border, #80808055); }
+h2 {
+  margin: 0;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--vscode-panel-border, #80808055);
+}
+.preview {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  place-items: center;
+  padding: 16px;
+}
+img { max-width: 100%; max-height: 100%; object-fit: contain; }
+p { color: var(--vscode-descriptionForeground, #888); text-align: center; }

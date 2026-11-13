@@ -660,3 +660,42 @@ test('single-file commit and revision comparisons retain exact revisions for nav
     assert.deepEqual(f.errors, []);
   } finally { f.dispose(); }
 });
+
+test('image diffs preserve bytes and compare the requested revisions, with an empty side for new images', async t => {
+  const [repo] = await shelfFixture(t), f = fixture();
+  const file = 'assets/icon.png';
+  const filename = path.join(repo.root, file);
+  // Include bytes that would be corrupted by decoding the blob as UTF-8.
+  const oldImage = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 255]);
+  const newImage = Buffer.from([...oldImage, 254]);
+  const uri = (bytes: Buffer) => 'data:image/png;base64,' + bytes.toString('base64');
+  try {
+    await fs.mkdir(path.dirname(filename), { recursive: true });
+    await fs.writeFile(filename, oldImage);
+    await repo.commit([file], 'Add image');
+    const before = (await repo.head())!.hash;
+    await f.commands.get('projectGit.openResource')!({ scheme: 'file', fsPath: repo.root });
+    await f.provider.handle({ type: 'diff', root: repo.root, path: file, hash: before });
+    assert.match(f.panel.webview.html, /新增图片，此版本无文件/);
+    assert.ok(f.panel.webview.html.includes(uri(oldImage)));
+
+    await fs.writeFile(filename, newImage);
+    await f.provider.handle({ type: 'diff', root: repo.root, path: file });
+    const local = f.panel.webview.html;
+    assert.ok(local.indexOf(uri(oldImage)) >= 0 && local.indexOf(uri(oldImage)) < local.indexOf(uri(newImage)));
+
+    await repo.commit([file], 'Update image');
+    const after = (await repo.head())!.hash;
+    await fs.unlink(filename);
+    for (const message of [{ type: 'diff', hash: after }, { type: 'compareFile', from: before, to: after }]) {
+      await f.provider.handle({ ...message, root: repo.root, path: file });
+      assert.ok(f.panel.webview.html.includes(uri(oldImage)));
+      assert.ok(f.panel.webview.html.includes(uri(newImage)));
+    }
+    await f.provider.handle({ type: 'diff', root: repo.root, path: file });
+    assert.ok(f.panel.webview.html.includes(uri(newImage)));
+    assert.doesNotMatch(f.panel.webview.html, /<img [^>]*alt="新版本"/);
+    assert.deepEqual(f.errors, []);
+    assert.equal(f.executed.filter(command => command.name === 'vscode.diff').length, 0);
+  } finally { f.dispose(); }
+});
