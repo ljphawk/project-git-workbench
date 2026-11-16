@@ -20,7 +20,7 @@ export class GitError extends Error {
   constructor(public readonly args: string[], public readonly stderr: string) { super(stderr.trim() || `git ${args[0]} 执行失败`); }
 }
 
-export interface GitOptions { indexFile?: string; input?: string | Buffer; includeStdoutOnError?: boolean }
+export interface GitOptions { indexFile?: string; input?: string | Buffer; includeStdoutOnError?: boolean; stableLocale?: boolean }
 
 /** Keep bytes intact for data that will later be applied back to the repository. */
 export function runGitBytes(cwd: string, args: string[], allowedCodes: number[] = [0], options: GitOptions = {}): Promise<Buffer> {
@@ -31,6 +31,7 @@ export function runGitBytes(cwd: string, args: string[], allowedCodes: number[] 
     const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS']) delete (env as NodeJS.ProcessEnv)[key];
     if (options.indexFile) env.GIT_INDEX_FILE = options.indexFile;
+    if (options.stableLocale) env.LC_ALL = 'C';
     const child = execFile('git', [...literal, '-C', cwd, ...args], {
       encoding: 'buffer', maxBuffer: 32 * 1024 * 1024, timeout: 120_000,
       env,
@@ -285,10 +286,24 @@ export class Repository {
     await this.run(['switch', '-c', name, ...(start ? [start] : [])]);
   }
 
-  async deleteBranch(name: string): Promise<void> {
-    const branch = (await this.branches()).find(b => b.name === name && !b.remote && !b.current);
-    if (!branch) throw new Error('只能删除非当前的本地分支。');
-    await this.run(['branch', '-d', '--', name]);
+  async deleteBranch(name: string, confirmForce?: (hash: string) => Promise<boolean>): Promise<boolean> {
+    const readBranch = async () => (await this.branches()).find(b => b.name === name && !b.remote);
+    const branch = await readBranch();
+    if (!branch?.hash || branch.current) throw new Error('只能删除非当前的本地分支。');
+    try {
+      await this.run(['branch', '-d', '--', name], undefined, { stableLocale: !!confirmForce });
+    } catch (error) {
+      // Only the native merge check can lead to force deletion. Other errors
+      // (including a branch used by another worktree) retain their normal path.
+      if (!confirmForce || !(error instanceof GitError) ||
+          !error.stderr.split('\n').some(line => line.trimEnd() === `error: the branch '${name}' is not fully merged`)) throw error;
+      if (!await confirmForce(branch.hash)) return false;
+      const current = await readBranch();
+      if (current?.hash !== branch.hash || current.current || current.worktree) throw new Error('确认期间目标分支已变化或被检出，请刷新后重试。');
+      // Keep Git's worktree guards and normal branch-config/reflog cleanup.
+      await this.run(['branch', '-D', '--', name]);
+    }
+    return true;
   }
 
   async mergeBranch(name: string): Promise<void> {

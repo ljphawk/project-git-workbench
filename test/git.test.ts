@@ -138,6 +138,40 @@ test('unmerged branch deletion is rejected and stash can be restored without dro
   assert.equal((await repo.stashes()).length, 1);
 });
 
+test('unmerged local branch can only be deleted after explicit force approval of its current tip', async t => {
+  const repo = await init(await fixture(t)); await seed(repo);
+  await repo.createBranch('feature/unmerged');
+  await repo.run(['commit', '--allow-empty', '-m', 'Unmerged work']);
+  const tip = (await repo.head())!.hash;
+  await repo.switchBranch('main');
+  let prompts = 0;
+  assert.equal(await repo.deleteBranch('feature/unmerged', async hash => {
+    assert.equal(hash, tip);
+    prompts++;
+    return false;
+  }), false);
+  assert.equal(prompts, 1);
+  assert.equal((await repo.branches()).find(b => b.name === 'feature/unmerged')?.hash, tip);
+  await assert.rejects(repo.deleteBranch('feature/unmerged', async () => {
+    await repo.run(['branch', '-f', 'feature/unmerged', 'main']);
+    return true;
+  }), /确认期间/);
+  assert.ok((await repo.branches()).some(b => b.name === 'feature/unmerged'));
+  await repo.run(['branch', '-f', 'feature/unmerged', tip]);
+  assert.equal(await repo.deleteBranch('feature/unmerged', async () => true), true);
+  assert.deepEqual((await repo.branches()).map(b => b.name), ['main']);
+});
+
+test('a branch checked out in another worktree never offers force deletion', async t => {
+  const dir = await fixture(t);
+  const repo = await init(path.join(dir, 'repo')); await seed(repo);
+  await repo.run(['worktree', 'add', '-b', 'occupied', path.join(dir, 'linked')]);
+  let prompted = false;
+  await assert.rejects(repo.deleteBranch('occupied', async () => { prompted = true; return true; }), /worktree/i);
+  assert.equal(prompted, false);
+  assert.ok((await repo.branches()).some(b => b.name === 'occupied'));
+});
+
 test('push, fetch and fast-forward pull use only the bound repository and remote', async t => {
   const dir = await fixture(t), remote = path.join(dir, 'remote.git');
   await fs.mkdir(remote); await runGit(remote, ['init', '--bare', '-b', 'main']);

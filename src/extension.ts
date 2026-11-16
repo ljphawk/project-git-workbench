@@ -690,7 +690,13 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
           case 'deleteBranch': {
             const name = message.ref?.kind === 'local' ? (await history.resolve(message.ref)).label : message.name || '';
             if (!await this.confirm(repo, '删除本地分支', name)) return;
-            await actions.assertReady(false); await repo.deleteBranch(name); break;
+            await actions.assertReady(false);
+            if (!await repo.deleteBranch(name, async hash => {
+              if (!await this.confirm(repo, '强制删除本地分支', `${dialogLine(name, 80)} · ${hash.slice(0, 12)}\nGit 判定该分支尚未完全合并。删除后，仅由该分支引用的提交可能无法从分支列表找回。远程分支不会被删除。`)) return false;
+              await actions.assertReady(false);
+              return true;
+            })) return;
+            break;
           }
           case 'deleteRemoteBranch': {
             if (message.ref?.kind !== 'remote') throw new Error('请选择远程分支。');
