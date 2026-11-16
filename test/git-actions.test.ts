@@ -138,6 +138,35 @@ test('local tag deletion refuses a tag replaced after the confirmation and accep
   await assert.rejects(new HistoryService(repo).requireCommit(tagHash), /标签对象/);
 });
 
+test('after local deletion only exact remote names are offered, and only the chosen remote branch is deleted', async t => {
+  const { repo, initial, parent } = await historyFixture(t), actions = new GitActions(repo);
+  const name = 'feature/topic';
+  await repo.run(['branch', name]);
+  for (const remote of ['origin', 'backup/team']) {
+    const bare = path.join(parent, `${remote.replace('/', '-')}.git`);
+    await repo.run(['init', '--bare', bare]);
+    await repo.run(['remote', 'add', remote, bare]);
+    await repo.run(['push', remote, `main:refs/heads/${name}`, 'main:refs/heads/topic']);
+  }
+  await repo.run(['symbolic-ref', 'refs/remotes/origin/alias', `refs/remotes/origin/${name}`]);
+  await repo.deleteBranch(name);
+  const targets = await actions.sameNameRemoteBranches(name);
+  assert.deepEqual(targets, [
+    { name: `backup/team/${name}`, remote: 'backup/team', hash: initial },
+    { name: `origin/${name}`, remote: 'origin', hash: initial },
+  ]);
+  assert.deepEqual(await actions.sameNameRemoteBranches('alias'), []);
+  assert.deepEqual(await actions.sameNameRemoteBranches('missing'), []);
+  const target = targets[0];
+  const ref = { kind: 'remote' as const, name: target.name };
+  await assert.rejects(actions.deleteRemoteBranch(ref, target.hash, 'backup'), /remote 已变化/);
+  await actions.deleteRemoteBranch(ref, target.hash, target.remote);
+  assert.deepEqual(await actions.sameNameRemoteBranches(name), [targets[1]]);
+  assert.equal(await repo.run(['ls-remote', '--heads', target.remote, `refs/heads/${name}`]), '');
+  assert.match(await repo.run(['ls-remote', '--heads', target.remote, 'refs/heads/topic']), new RegExp(initial));
+  assert.match(await repo.run(['ls-remote', '--heads', 'origin', `refs/heads/${name}`]), new RegExp(initial));
+});
+
 test('an empty cherry-pick can be explicitly skipped without changing the branch history', async t => {
   const { repo, commit } = await historyFixture(t), actions = new GitActions(repo);
   const target = await commit('next.txt', 'next', 'Already applied');

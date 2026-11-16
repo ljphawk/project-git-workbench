@@ -10,6 +10,12 @@ export type BranchPullResult = { branch: string } & (
   { status: 'fast-forward'; range: CommitRange } |
   { status: 'up-to-date' | 'local-ahead' }
 );
+export interface RemoteBranchTarget { name: string; remote: string; hash: string }
+
+function branchRemote(name: string, remotes: string[]): string | undefined {
+  return remotes.find(remote => name.startsWith(`${remote}/`));
+}
+
 export class GitActions {
   constructor(private repo: Repository) {}
 
@@ -129,14 +135,31 @@ export class GitActions {
     await this.repo.run(['-c', `remote.${remote}.mirror=false`, 'push', '--porcelain', '--no-follow-tags', '--recurse-submodules=no', '--', remote, `${tag.hash}:refs/tags/${tag.name}`], undefined, { includeStdoutOnError: true });
   }
 
-  async deleteRemoteBranch(ref: GitRef, expectedHash?: string): Promise<void> {
+  private async branchRemotes(): Promise<string[]> {
+    return (await this.repo.run(['remote'])).split('\n').filter(Boolean).sort((a, b) => b.length - a.length);
+  }
+
+  async sameNameRemoteBranches(branch: string): Promise<RemoteBranchTarget[]> {
+    if (branch === 'HEAD') return [];
+    const [remotes, rows] = await Promise.all([
+      this.branchRemotes(),
+      this.repo.run(['for-each-ref', '--format=%(refname:strip=2)%00%(objectname)%00%(objecttype)%00%(symref)', 'refs/remotes/']),
+    ]);
+    return rows.split('\n').flatMap(row => {
+      const [name, hash, type, symbolic] = row.split('\0');
+      const remote = branchRemote(name, remotes);
+      return remote && name === `${remote}/${branch}` && type === 'commit' && !symbolic ? [{ name, remote, hash }] : [];
+    });
+  }
+
+  async deleteRemoteBranch(ref: GitRef, expectedHash?: string, expectedRemote?: string): Promise<void> {
     await this.assertReady(false);
     if (ref.kind !== 'remote' || !ref.name) throw new Error('请选择远程分支。');
     const selected = await new HistoryService(this.repo).resolve(ref);
     if (expectedHash && selected.hash !== expectedHash) throw new Error('确认期间远程跟踪分支已变化，请刷新后重试。');
-    const remotes = (await this.repo.run(['remote'])).split('\n').filter(Boolean).sort((a, b) => b.length - a.length);
-    const remote = remotes.find(name => ref.name!.startsWith(`${name}/`));
+    const remote = branchRemote(ref.name, await this.branchRemotes());
     if (!remote) throw new Error('无法确定该分支所属的 remote。');
+    if (expectedRemote && expectedRemote !== remote) throw new Error('目标 remote 已变化，请刷新后重试。');
     const branch = ref.name.slice(remote.length + 1);
     if (!branch || branch === 'HEAD') throw new Error('不能删除远程 HEAD。');
     // Explicit deletion refspec and lease prevent an implicit mirror push or

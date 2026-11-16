@@ -6,7 +6,7 @@ import { Repository, Snapshot, discoverRepositories, findRepository, Change, run
 import { ShelfStore } from './shelf';
 import { explorerSelection } from './explorer-selection';
 import { HistoryService, HistoryQuery, CommitRange, GitRef, refKey } from './history';
-import { GitActions, GitOperation, BranchPullResult } from './git-actions';
+import { GitActions, GitOperation, BranchPullResult, RemoteBranchTarget } from './git-actions';
 import { confirmationDetail, dialogLine, discardSummary } from './dialog';
 import { remoteAddresses } from './remotes';
 import { diffFiles } from './diff-list';
@@ -514,13 +514,28 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     this.broadcast();
   }
 
-  private async handle(message: Message, source?: vscode.Webview): Promise<void> {
+  private async notifyLocalBranchDeleted(repo: Repository, branch: string): Promise<void> {
+    const title = `${path.basename(repo.root)}：已删除本地分支 ${branch}`;
+    const targets = await new GitActions(repo).sameNameRemoteBranches(branch).catch(() => []);
+    if (this.disposed) return;
+    if (!targets.length) { void vscode.window.showInformationMessage(title); return; }
+    const action = '删除同名远程分支…';
+    if (await vscode.window.showInformationMessage(title, action) !== action || this.disposed) return;
+    const target = targets.length === 1 ? targets[0] : (await vscode.window.showQuickPick(
+      targets.map(target => ({ label: target.name, description: target.hash.slice(0, 12), target })),
+      { title: `选择要删除的远程分支 · ${path.basename(repo.root)}`, placeHolder: '选择一个远程分支' },
+    ))?.target;
+    if (!target || this.disposed) return;
+    await this.handle({ type: 'deleteRemoteBranch', root: repo.root, ref: { kind: 'remote', name: target.name } }, undefined, { repo, target });
+  }
+
+  private async handle(message: Message, source?: vscode.Webview, followUp?: { repo: Repository; target: RemoteBranchTarget }): Promise<void> {
     if (this.disposed || !message || typeof message.type !== 'string') return;
     if (message.type === 'ready') { this.broadcast(); return; }
     if (message.type === 'pick') { await this.pick(); return; }
     if (message.type === 'openPanel') { await this.open(); return; }
     if (message.type === 'refresh') { await this.refresh(); return; }
-    const repo = this.repository;
+    const repo = followUp?.repo ?? this.repository;
     if (!repo || message.root !== repo.root) throw new Error('目标仓库已切换，请在当前项目重试。');
     if (message.type === 'repoRemotes') {
       const addresses = await remoteAddresses(repo).catch(error => {
@@ -584,6 +599,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
     this.busy = true; this.error = ''; this.broadcast();
     let completed = false;
     let pullResult: BranchPullResult | undefined;
+    let deletedLocalBranch: string | undefined;
     try {
       await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Project Git · ${path.basename(repo.root)}` }, async () => {
         if (['switch', 'merge', 'rebase', 'checkoutCommit', 'cherryPick', 'revertCommit', 'resetCommit'].includes(message.type) && vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.scheme === 'file' && this.contains(repo.root, document.uri.fsPath))) {
@@ -696,13 +712,15 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
               await actions.assertReady(false);
               return true;
             })) return;
+            deletedLocalBranch = name;
             break;
           }
           case 'deleteRemoteBranch': {
             if (message.ref?.kind !== 'remote') throw new Error('请选择远程分支。');
             const target = await history.resolve(message.ref);
+            if (followUp && target.hash !== followUp.target.hash) throw new Error('远程跟踪分支已变化，请从分支列表重新确认。');
             if (!await this.confirm(repo, '删除远程分支', `将从远程仓库删除 ${target.label} (${target.hash.slice(0, 8)})；若远程已更新，操作会拒绝执行。`)) return;
-            await actions.deleteRemoteBranch(message.ref, target.hash); break;
+            await actions.deleteRemoteBranch(message.ref, target.hash, followUp?.target.remote); break;
           }
           case 'createTag': {
             const base = message.ref ? await history.resolve(message.ref) : { hash: await history.requireCommit(message.hash || ''), label: (message.hash || '').slice(0, 8) };
@@ -785,7 +803,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
       });
       if (completed && !this.disposed) {
         this.postToViews({ type: 'completed', action: message.type, root: repo.root });
-        if (!pullResult) void vscode.window.showInformationMessage(`${path.basename(repo.root)}：${({ commit: '提交完成', stage: '已加入暂存区（尚未提交）', unstage: '已取消暂存，本地修改已保留', shelve: '修改已搁置到 Shelf', unshelve: 'Shelf 已恢复，备份已保留', deleteShelf: 'Shelf 备份已删除', push: '推送完成', pushTag: '标签推送完成', fetch: '获取完成' } as Record<string, string>)[message.type] || '操作完成'}`);
+        if (!pullResult && !deletedLocalBranch) void vscode.window.showInformationMessage(`${path.basename(repo.root)}：${({ commit: '提交完成', stage: '已加入暂存区（尚未提交）', unstage: '已取消暂存，本地修改已保留', shelve: '修改已搁置到 Shelf', unshelve: 'Shelf 已恢复，备份已保留', deleteShelf: 'Shelf 备份已删除', push: '推送完成', pushTag: '标签推送完成', fetch: '获取完成', deleteRemoteBranch: '远程分支已删除' } as Record<string, string>)[message.type] || '操作完成'}`);
       }
     } catch (error) { this.report(new Error(`${repo.root}\n${error instanceof Error ? error.message : String(error)}`)); }
     finally {
@@ -797,6 +815,7 @@ class Workbench implements vscode.WebviewViewProvider, vscode.Disposable {
       if (!completed && operationError) { this.error = operationError; this.broadcast(); }
     }
     if (completed && pullResult) await this.notifyPull(repo, pullResult).catch(error => this.report(error));
+    if (completed && deletedLocalBranch) await this.notifyLocalBranchDeleted(repo, deletedLocalBranch).catch(error => this.report(error));
   }
 
   dispose(): void {
